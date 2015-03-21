@@ -1,0 +1,388 @@
+#! /usr/bin/env phantomjs
+// -*- js2 -*-
+
+var webpage = require('webpage')
+  , system = require('system')
+  , fs = require('fs')
+  , RECIPE, URLS, MULTIPLE, REVERSE;
+  ;
+
+function json(x) {
+  var tailOp = /\ ?([,\{\[])\n ( *)(?: )/gm // make trailing ,{[ become leading
+    , cuddle = /(^|[,\{\[] ?)\n */gm // cuddle brackets, braces and array items
+    , leadOp = '\n$2$1 ';
+  return JSON.stringify(x, 0, 2).replace(tailOp, leadOp).replace(cuddle, '$1');
+}
+
+function fail(status) {
+  console.log('Usage: scrape [-r] <recipe> <urls>\n' +
+              '(both recipe and urls may be files; json or (urls) text)');
+  phantom.exit(status || 0);
+}
+
+function parse(s) {
+  try { return JSON.parse(s); } catch(e) {}
+}
+
+function loadOrParse(s) {
+  var ok = parse(s);
+  if (ok) return ok;
+  try {
+    var f = fs.read(s, 'utf-8');
+    if (f) return parse(f) || f.split('\n').filter(function(i) { return i; });
+  } catch(e) {}
+  return s;
+}
+
+if (system.args.length < 3)
+  fail();
+else {
+  var args = system.args.slice(1);
+  URLS = args.filter(function(opt) { return opt !== '-r'; });
+  REVERSE = URLS.length !== args.length;
+  RECIPE = loadOrParse(URLS.shift());
+  URLS = [].concat.apply([], URLS.map(loadOrParse));
+  if (URLS.length)
+    load(URLS.shift(), loaded);
+  else
+    fail(1);
+  MULTIPLE = URLS.length;
+}
+
+function load(url, fn) {
+  var page = webpage.create();
+  page.onConsoleMessage = function(msg) {
+    console.log(msg);
+  };
+  page.open(url, function (status) {
+    if (status !== 'success')
+      console.log('Unable to load ' + url);
+    else
+      fn(page);
+  });
+}
+
+function loaded(page) {
+  page.onConsoleMessage = function(msg) {
+    scraped = JSON.parse(msg);
+    if (REVERSE) scraped = scraped.reverse();
+    if (MULTIPLE) {
+      console.log(JSON.stringify(scraped));
+      if (URLS.length)
+        load(URLS.shift(), loaded);
+      else
+        phantom.exit();
+    } else {
+      console.log(json(scraped));
+      phantom.exit();
+    }
+  };
+  //page.evaluate(show, String(on), JSON.stringify(RECIPE));
+  page.evaluate(inPage, String(on), JSON.stringify(RECIPE));
+}
+
+function show() {
+  console.log(JSON.stringify([].slice.call(arguments)));
+}
+
+function inPage(on, recipe) {
+  eval(on);
+  recipe = JSON.parse(recipe);
+  on(
+  { dom: recipe
+  , ready: function(dom) { console.log(JSON.stringify(dom)); }
+  });
+}
+
+function scrape(page, recipe) {
+  page.onConsoleMessage = function(msg) {
+    var d = JSON.parse(msg);
+    //if (!W && !H) { W = d.w; H = d.h; }
+    //if ( W && !H) { H = W * d.h / d.w; }
+    //if (!W &&  H) { W = H * d.w / d.h; }
+    //console.log(JSON.stringify(d), W, H);
+    //screenshot(URL, FILENAME, W, H);
+    console.log('caught', msg);
+  };
+
+  page.evaluate(function() {
+    console.log(JSON.stringify([].slice.call(arguments)));
+  }, 12, 34);
+//    //'try { (window.on='+ on +')(); } catch(e) {}' +
+//    function() { console.log(JSON.stringify([12])); }
+//  );
+}
+
+function on(opts, plugins) {
+  var Object_toString = Object.prototype.toString
+    , Array_slice = Array.prototype.slice
+    , FAIL = 'dom' in on ? undefined : (function() {
+        var tests =
+              { path_re: { fn: test_regexp }
+              , query:   { fn: test_query }
+              , dom:     { fn: test_dom
+                         , my: { 'css*':   $c
+                               , 'css+':   one_or_more($c)
+                               , 'css?':   $C
+                               , 'css':    not_null($C)
+                               , 'xpath*': $x
+                               , 'xpath+': one_or_more($x)
+                               , 'xpath?': $X
+                               , 'xpath!': truthy($x)
+                               , 'xpath':  not_null($X)
+                               }
+                         }
+              , inject: { fn: inject }
+              }
+          , name, test, me, my, mine
+          ;
+
+        for (name in tests) {
+          test = tests[name];
+          me = test.fn;
+          if ((my = test.my))
+            for (mine in my)
+              me[mine] = my[mine];
+          on[name] = me;
+        }
+      })()
+
+    , input = [] // args for the callback(s?) the script wants to run
+    , rules = Object.create(opts) // wraps opts in a pokeable inherit layer
+    , debug = get('debug')
+    , script = get('name')
+    , ready = get('ready')
+    , load = get('load')
+    , pushState = get('pushstate')
+    , pjax_event = get('pjaxevent')
+    , name, rule, test, result, retry, plugin
+    ;
+
+  if (typeof ready !== 'function' &&
+      typeof load  !== 'function' &&
+      typeof pushState !== 'function') {
+    alert('no on function');
+    throw new Error('on() needs at least a "ready" or "load" function!');
+  }
+
+  if (plugins)
+    for (name in plugins)
+      if ((rule = plugins[name]) && (test = on[name]))
+        for (plugin in rule)
+          if (!(test[plugin])) {
+            on._parse_dom_rule = null;
+            test[plugin] = rule[plugin];
+          }
+
+  if (pushState && history.pushState &&
+      (on.pushState = on.pushState || []).indexOf(opts) === -1) {
+    on.pushState.push(opts); // make sure we don't re-register after navigation
+    initPushState(pushState, pjax_event);
+  }
+
+  try {
+    for (name in rules) {
+      rule = rules[name];
+      if (rule === undefined) continue; // was some callback or other non-rule
+      test = on[name];
+      if (!test) throw new Error('did not grok rule "'+ name +'"!');
+      result = test(rule);
+      if (result === FAIL) return false; // the page doesn't satisfy all rules
+      input.push(result);
+    }
+  }
+  catch(e) {
+    if (debug) console.warn("on(debug): we didn't run because " + e.message);
+    return false;
+  }
+
+  if (ready) {
+    ready.apply(opts, input.concat());
+  }
+  if (load) window.addEventListener('load', function() {
+    load.apply(opts, input.concat());
+  });
+  return input.concat(opts);
+
+  function get(x) { rules[x] = undefined; return opts[x]; }
+  function isArray(x)  { return Object_toString.call(x) === '[object Array]'; }
+  function isObject(x) { return Object_toString.call(x) === '[object Object]'; }
+  function array(a)    { return Array_slice.call(a, 0); } // array:ish => Array
+  function arrayify(x) { return isArray(x) ? x : [x]; }  // non-array? => Array
+  function inject(fn, args) {
+    var script = document.createElement('script')
+      , parent = document.documentElement;
+    args = JSON.stringify(args || []).slice(1, -1);
+    script.textContent = '('+ fn +')('+ args +');';
+    parent.appendChild(script);
+    parent.removeChild(script);
+  }
+
+  function initPushState(callback, pjax_event) {
+    if (!history.pushState.armed) {
+      inject(function(pjax_event) {
+        function reportBack() {
+          var e = document.createEvent('Events');
+          e.initEvent('history.pushState', !'bubbles', !'cancelable');
+          document.dispatchEvent(e);
+        }
+        var pushState = history.pushState;
+        history.pushState = function on_pushState() {
+          if (pjax_event && window.$ && $.pjax)
+            $(document).one(pjax_event, reportBack);
+          else
+            setTimeout(reportBack, 0);
+          return pushState.apply(this, arguments);
+        };
+      }, [pjax_event]);
+      history.pushState.armed = pjax_event;
+    }
+
+    retry = function after_pushState() {
+      rules = Object.create(opts);
+      rules.load = rules.pushstate = undefined;
+      rules.ready = callback;
+      on(rules);
+    };
+
+    document.addEventListener('history.pushState', function() {
+      if (debug) console.log('on.pushstate', location.pathname);
+      retry();
+    }, false);
+  }
+
+  function test_query(spec) {
+    var q = unparam(this === on || this === window ? location.search : this);
+    if (spec === true || spec == null) return q; // decode the query for me!
+    throw new Error('bad query type '+ (typeof spec) +': '+ spec);
+  }
+
+  function unparam(query) {
+    var data = {};
+    (query || '').replace(/\+/g, '%20').split('&').forEach(function(kv) {
+      kv = /^\??([^=&]*)(?:=(.*))?/.exec(kv);
+      if (!kv) return;
+      var prop, val, k = kv[1], v = kv[2], e, m;
+      try { prop = decodeURIComponent(k); } catch (e) { prop = unescape(k); }
+      if ((val = v) != null)
+        try { val = decodeURIComponent(v); } catch (e) { val = unescape(v); }
+      data[prop] = val;
+    });
+    return data;
+  }
+
+  function test_regexp(spec) {
+    if (!isArray(spec)) spec = arrayify(spec);
+    var re = spec.shift();
+    if (typeof re === 'string') re = new RegExp(re);
+    if (!(re instanceof RegExp))
+      throw new Error((typeof re) +' was not a regexp: '+ re);
+
+    var ok = re.exec(this === on || this === window ? location.pathname : this);
+    if (ok === null) return FAIL;
+    if (!spec.length) return ok;
+    var named = {};
+    ok.shift(); // drop matching-whole-regexp part
+    while (spec.length) named[spec.shift()] = ok.shift();
+    return named;
+  }
+
+  function truthy(fn) { return function(s) {
+    var x = fn.apply(this, arguments); return x || FAIL;
+  }; }
+
+  function not_null(fn) { return function(s) {
+    var x = fn.apply(this, arguments); return x !== null ? x : FAIL;
+  }; }
+
+  function one_or_more(fn) { return function(s) {
+    var x = fn.apply(this, arguments); return x.length ? x : FAIL;
+  }; }
+
+  function $c(css) { return array(this.querySelectorAll(css)); }
+  function $C(css) { return this.querySelector(css); }
+
+  function $x(xpath) {
+    var doc = this.evaluate ? this : this.ownerDocument, next;
+    var got = doc.evaluate(xpath, this, null, 0, null), all = [];
+    switch (got.resultType) {
+      case 1/*XPathResult.NUMBER_TYPE*/:  return got.numberValue;
+      case 2/*XPathResult.STRING_TYPE*/:  return got.stringValue;
+      case 3/*XPathResult.BOOLEAN_TYPE*/: return got.booleanValue;
+      default: while ((next = got.iterateNext())) all.push(next); return all;
+    }
+  }
+  function $X(xpath) {
+    var got = $x.call(this, xpath);
+    return got instanceof Array ? got[0] || null : got;
+  }
+
+  function quoteRe(s) { return (s+'').replace(/([-$(-+.?[-^{|}])/g, '\\$1'); }
+
+  // DOM constraint tester / scraper facility:
+  // "this" is the context Node(s) - initially the document
+  // "spec" is either of:
+  //   * css / xpath Selector "selector_type selector"
+  //   * resolved for context [ context Selector, spec ]
+  //   * an Object of spec(s) { property_name: spec, ... }
+  function test_dom(spec, context) {
+    // returns FAIL if it turned out it wasn't a mandated match at this level
+    // returns null if it didn't find optional matches at this level
+    // returns Node or an Array of nodes, or a basic type from some XPath query
+    function lookup(rule) {
+      switch (typeof rule) {
+        case 'string': break; // main case - rest of function
+        case 'object': if ('nodeType' in rule || rule.length) return rule;
+          // fall-through
+        default: throw new Error('non-String dom match rule: '+ rule);
+      }
+      if (!on._parse_dom_rule) on._parse_dom_rule = new RegExp('^(' +
+        Object.keys(on.dom).map(quoteRe).join('|') + ')\\s*(.*)');
+      var match = on._parse_dom_rule.exec(rule), type, func;
+      if (match) {
+        type = match[1];
+        rule = match[2];
+        func = test_dom[type];
+      }
+      if (!func) throw new Error('unknown dom match rule '+ type +': '+ rule);
+      return func.call(this, rule);
+    }
+
+    var results, result, i, property_name;
+    if (context === undefined) {
+      context = this === on || this === window ? document : this;
+    }
+
+    // validate context:
+    if (context === null || context === FAIL) return FAIL;
+    if (isArray(context)) {
+      for (results = [], i = 0; i < context.length; i++) {
+        result = test_dom.call(context[i], spec);
+        if (result !== FAIL)
+          results.push(result);
+      }
+      return results;
+    }
+    if (typeof context !== 'object' || !('nodeType' in context))
+      throw new Error('illegal context: '+ context);
+
+    // handle input spec format:
+    if (typeof spec === 'string') return lookup.call(context, spec);
+    if (isArray(spec)) {
+      context = lookup.call(context, spec[0]);
+      if (context === null || context === FAIL) return context;
+      return test_dom.call(context, spec[1]);
+    }
+    if (isObject(spec)) {
+      results = {};
+      for (property_name in spec) {
+        result = test_dom.call(context, spec[property_name]);
+        if (result === FAIL) return FAIL;
+        results[property_name] = result;
+      }
+      return results;
+    }
+
+    throw new Error("dom spec was neither a String, Object nor Array: "+ spec);
+  }
+}

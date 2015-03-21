@@ -1,0 +1,16 @@
+{ "name": "scrape"
+, "version": "1.0.0"
+, "author": "Johan Sundström <oyasumi@gmail.com>"
+, "description": "on.js-style file scraping from your shell"
+, "repository":
+  { "type": "git"
+  , "url": "git://github.com/johan/scrape.json"
+  }
+, "main": "scrape"
+, "dependencies":
+  { "phantomjs": "^1.9.16"
+  }
+, "engines":
+  { "node": ">=0.10"
+  }
+}
