@@ -110,10 +110,12 @@ function show() {
 function inPage(on, recipe) {
   eval(on);
   recipe = JSON.parse(recipe);
-  on(
+  var found = on(
   { dom: recipe
   , ready: function(dom) { console.log(JSON.stringify(dom)); }
   });
+  if (!found || !found[0])
+    console.log('null'); // ensure we terminate even when nothing was found
 }
 
 function scrape(page, recipe) {
