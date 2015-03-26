@@ -4,8 +4,10 @@
 var webpage = require('webpage')
   , system = require('system')
   , fs = require('fs')
-  , RECIPE, URLS, MULTIPLE, REVERSE;
-  ;
+  , RECIPE, URLS, MULTIPLE, OPTS = {}, OPTIONS = 
+    { '-r': 'reverse'
+    , '-v': 'verbose'
+    };
 
 function json(x) {
   var tailOp = /\ ?([,\{\[])\n ( *)(?: )/gm // make trailing ,{[ become leading
@@ -15,7 +17,7 @@ function json(x) {
 }
 
 function fail(status) {
-  console.log('Usage: scrape [-r] <recipe> <urls>\n' +
+  console.log('Usage: scrape [-rv] <recipe> <urls>\n' +
               '(both recipe and urls may be files; json or (urls) text)');
   phantom.exit(status || 0);
 }
@@ -34,17 +36,35 @@ function loadOrParse(s) {
   return s;
 }
 
+function detectOptions(opt) {
+  var flag = OPTIONS[opt];
+  if (flag) OPTS[flag] = true;
+  return !flag;
+}
+
+function debug() {
+  if (OPTS.verbose) console.log.apply(console, arguments);
+}
+
 if (system.args.length < 3)
   fail();
 else {
   var args = system.args.slice(1);
-  URLS = args.filter(function(opt) { return opt !== '-r'; });
-  REVERSE = URLS.length !== args.length;
+  URLS = args.filter(detectOptions);
+
   RECIPE = loadOrParse(URLS.shift());
+  if (typeof RECIPE != 'object') {
+    console.error('Failed to decode recipe JSON to an object:\n' + RECIPE);
+    fail();
+  }
+
+  if (OPTS.verbose) debug(json(RECIPE));
   URLS = [].concat.apply([], URLS.map(loadOrParse));
-  if (URLS.length)
-    load(URLS.shift(), loaded);
-  else
+  if (URLS.length) {
+    url = URLS.shift();
+    debug('Loading ' + url);
+    load(url, loaded);
+  } else
     fail(1);
   MULTIPLE = URLS.length;
 }
@@ -57,15 +77,17 @@ function load(url, fn) {
   page.open(url, function (status) {
     if (status !== 'success')
       console.log('Unable to load ' + url);
-    else
+    else {
+      debug('Loaded ' + url);
       fn(page);
+    }
   });
 }
 
 function loaded(page) {
   page.onConsoleMessage = function(msg) {
     scraped = JSON.parse(msg);
-    if (REVERSE) scraped = scraped.reverse();
+    if (OPTS.reverse) scraped = scraped.reverse();
     if (MULTIPLE) {
       console.log(JSON.stringify(scraped));
       if (URLS.length)
